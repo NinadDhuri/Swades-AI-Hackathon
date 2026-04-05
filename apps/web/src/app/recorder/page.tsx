@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { Download, Mic, Pause, Play, Square, Trash2 } from "lucide-react"
 
 import { Button } from "@my-better-t-app/ui/components/button"
@@ -12,6 +12,7 @@ import {
   CardTitle,
 } from "@my-better-t-app/ui/components/card"
 import { LiveWaveform } from "@/components/ui/live-waveform"
+import { useChunkPipeline } from "@/hooks/use-chunk-pipeline"
 import { useRecorder, type WavChunk } from "@/hooks/use-recorder"
 
 function formatTime(seconds: number) {
@@ -78,6 +79,15 @@ export default function RecorderPage() {
   const [deviceId] = useState<string | undefined>()
   const { status, start, stop, pause, resume, chunks, elapsed, stream, clearChunks } =
     useRecorder({ chunkDuration: 5, deviceId })
+  const {
+    pendingCount,
+    syncedCount,
+    lastError,
+    addChunkToPipeline,
+    forceReconcile,
+    isOpfsAvailable,
+  } = useChunkPipeline()
+  const processedChunkIdsRef = useRef<Set<string>>(new Set())
 
   const isRecording = status === "recording"
   const isPaused = status === "paused"
@@ -90,6 +100,18 @@ export default function RecorderPage() {
       start()
     }
   }, [isActive, stop, start])
+
+  useEffect(() => {
+    const nextChunks = chunks.filter((chunk) => !processedChunkIdsRef.current.has(chunk.id))
+    if (nextChunks.length === 0) {
+      return
+    }
+
+    for (const chunk of nextChunks) {
+      processedChunkIdsRef.current.add(chunk.id)
+      void addChunkToPipeline(chunk)
+    }
+  }, [addChunkToPipeline, chunks])
 
   return (
     <div className="container mx-auto flex max-w-lg flex-col items-center gap-6 px-4 py-8">
@@ -167,6 +189,18 @@ export default function RecorderPage() {
                 )}
               </Button>
             )}
+          </div>
+
+          <div className="rounded-sm border border-border/50 bg-muted/10 p-3 text-xs">
+            <p className="font-medium">Reliability Pipeline</p>
+            <p className="text-muted-foreground">
+              OPFS {isOpfsAvailable ? "available" : "not supported"} · pending {pendingCount} · synced{" "}
+              {syncedCount}
+            </p>
+            {lastError ? <p className="text-destructive">{lastError}</p> : null}
+            <Button variant="outline" size="sm" className="mt-2" onClick={() => void forceReconcile()}>
+              Reconcile now
+            </Button>
           </div>
         </CardContent>
       </Card>
