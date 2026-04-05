@@ -1,25 +1,3 @@
-# Reliable Recording Chunking Pipeline
-
-An assignment for building a reliable chunking setup that ensures recording data stays accurate in all cases — no data loss, no silent failures.
-
-## How It Works
-
-```
-Client (Browser)
-    │
-    ├── 1. Record & chunk data on the client side
-    ├── 2. Store chunks in OPFS (Origin Private File System)
-    ├── 3. Upload chunks to a storage bucket
-    ├── 4. On success → acknowledge (ack) to the database
-    │
-    └── Recovery: if DB has ack but chunk is missing from bucket
-        └── Re-send from OPFS → bucket
-```
-
-**Main objective:** In all cases, the recording data stays accurate. OPFS acts as the durable client-side buffer — chunks are only cleared after the bucket and DB are both confirmed in sync.
-
-### Flow Details
-
 1. **Client-side chunking** — Recording data is split into chunks in the browser
 2. **OPFS storage** — Each chunk is persisted to the Origin Private File System before any network call, so nothing is lost if the tab closes or the network drops
 3. **Bucket upload** — Chunks are uploaded to a storage bucket (can be a local bucket for testing, e.g. MinIO or a local S3-compatible store)
@@ -46,6 +24,12 @@ npm install
 1. Make sure you have a PostgreSQL database set up.
 2. Update your `apps/server/.env` with your PostgreSQL connection details.
 3. Apply the schema:
+2. Update your `apps/server/.env` with:
+   - `DATABASE_URL`
+   - `CORS_ORIGIN` (for local dev, `http://localhost:3001`)
+3. Update your `apps/web/.env.local` with:
+   - `NEXT_PUBLIC_SERVER_URL` (for local dev, `http://localhost:3000`)
+4. Apply the schema:
 
 ```bash
 npm run db:push
@@ -59,6 +43,58 @@ npm run dev
 
 - Web app: [http://localhost:3001](http://localhost:3001)
 - API server: [http://localhost:3000](http://localhost:3000)
+
+## Implemented API Contract
+
+### `POST /api/chunks/upload`
+
+Uploads a chunk to the local bucket (`apps/server/.bucket`) and writes/updates a DB ack in `chunk_acknowledgements`.
+
+Request body:
+
+```json
+{
+  "sessionId": "session-uuid",
+  "chunkId": "chunk-uuid",
+  "checksum": "sha256-hex",
+  "data": "base64-wav-payload"
+}
+```
+
+Response:
+
+```json
+{
+  "ok": true,
+  "chunkId": "chunk-uuid",
+  "bucketKey": "session-uuid/chunk-uuid.wav",
+  "byteSize": 12345
+}
+```
+
+### `GET /api/chunks/status?sessionId=<id>&chunkId=<id>`
+
+Returns whether the chunk is acknowledged in DB and physically present in the bucket.
+
+Response:
+
+```json
+{
+  "ok": true,
+  "chunkId": "chunk-uuid",
+  "sessionId": "session-uuid",
+  "acked": true,
+  "inBucket": true
+}
+```
+
+## OPFS Pipeline Notes
+
+- Chunks are first persisted in OPFS under `recording-chunks/` before any upload attempt.
+- The client stores a `manifest.json` to keep a durable queue of pending chunks.
+- A reconciliation loop runs periodically and can also be triggered manually from the UI:
+  - if `acked=true` and `inBucket=true`, OPFS files are removed;
+  - otherwise the client re-uploads from OPFS until both DB and bucket are in sync.
 
 ## Load Testing
 
@@ -88,9 +124,13 @@ export const options = {
 };
 
 export default function () {
+  const data = "x".repeat(1024); // 1KB dummy payload
   const payload = JSON.stringify({
+    sessionId: "load-test-session",
     chunkId: `chunk-${__VU}-${__ITER}`,
     data: "x".repeat(1024), // 1KB dummy chunk
+    checksum: "test-checksum",
+    data: btoa(data),
   });
 
   const res = http.post("http://localhost:3000/api/chunks/upload", payload, {
@@ -108,6 +148,7 @@ Run:
 ```bash
 k6 run load-test.js
 ```
+> Note: k6 does not include `btoa` in all runtimes. If needed, replace with a static base64 test value or use a helper implementation.
 
 ### What to Validate
 
@@ -120,6 +161,7 @@ k6 run load-test.js
 
 ```
 recoding-assignment/
+recording-assignment/
 ├── apps/
 │   ├── web/         # Frontend (Next.js) — chunking, OPFS, upload logic
 │   └── server/      # Backend API (Hono) — bucket upload, DB ack
